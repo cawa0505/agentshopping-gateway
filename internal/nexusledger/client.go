@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,10 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// ErrInsufficientBalance is returned by Spend when NexusLedger rejects the
+// debit for lack of points (HTTP 409).
+var ErrInsufficientBalance = errors.New("insufficient balance")
 
 // Config pins the NexusLedger endpoints and defaults the tenant.
 type Config struct {
@@ -59,7 +64,11 @@ func (c Config) balanceURL(id string) string {
 	if c.Balance != "" {
 		return c.Balance
 	}
-	return c.BaseURL + "/v1/ledger/accounts/" + id + "/balance"
+	return c.ledgerURL(id, "balance")
+}
+
+func (c Config) ledgerURL(id, action string) string {
+	return c.BaseURL + "/v1/ledger/accounts/" + id + "/" + action
 }
 
 // Client talks to NexusLedger.
@@ -171,39 +180,105 @@ func (c *Client) VerifyIdentity(ctx context.Context, token string) (map[string]a
 	return nil, fmt.Errorf("jwt invalid (expired or bad signature)")
 }
 
+// Earn credits points to an account (e.g. transaction commission). Returns the
+// post-entry account balance.
+func (c *Client) Earn(ctx context.Context, id string, amount int64, ref string) (int64, error) {
+	return c.ledgerWrite(ctx, c.cfg.ledgerURL(id, "earn"), amount, ref)
+}
+
+// Spend debits points from an account (e.g. point redemption / discount).
+// Returns ErrInsufficientBalance when NexusLedger rejects with 409.
+func (c *Client) Spend(ctx context.Context, id string, amount int64, ref string) (int64, error) {
+	return c.ledgerWrite(ctx, c.cfg.ledgerURL(id, "spend"), amount, ref)
+}
+
+func (c *Client) ledgerWrite(ctx context.Context, url string, amount int64, ref string) (int64, error) {
+	payload := map[string]any{"amount": amount}
+	if ref != "" {
+		payload["reference_id"] = ref
+	}
+	body, status, err := c.postJSON(ctx, url, payload)
+	if err != nil {
+		return 0, err
+	}
+	if status == http.StatusConflict {
+		return 0, ErrInsufficientBalance
+	}
+	if status >= 400 {
+		return 0, fmt.Errorf("ledger write: http %d", status)
+	}
+	var e struct {
+		BalanceAfter int64 `json:"balance_after"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil {
+		return 0, fmt.Errorf("parse ledger entry: %w", err)
+	}
+	return e.BalanceAfter, nil
+}
+
 // --- HTTP helpers ---
+
+func (c *Client) setSite(req *http.Request) {
+	if c.cfg.SiteID != "" {
+		req.Header.Set("X-Site-ID", c.cfg.SiteID)
+	}
+}
 
 func (c *Client) httpGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return c.do(req)
-}
-
-func (c *Client) httpPostJSON(ctx context.Context, url string, payload any) ([]byte, error) {
-	body, err := json.Marshal(payload)
+	c.setSite(req)
+	body, status, err := c.send(req)
 	if err != nil {
 		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("http %d", status)
+	}
+	return body, nil
+}
+
+// httpPostJSON posts and treats any >=400 as an error (ability/generic use).
+func (c *Client) httpPostJSON(ctx context.Context, url string, payload any) ([]byte, error) {
+	body, status, err := c.postJSON(ctx, url, payload)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("http %d", status)
+	}
+	return body, nil
+}
+
+// postJSON posts and returns the raw status so callers can branch on it
+// (e.g. ledger spend 409). It does not treat >=400 as a transport error.
+func (c *Client) postJSON(ctx context.Context, url string, payload any) ([]byte, int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	c.setSite(req)
+	return c.send(req)
 }
 
-func (c *Client) do(req *http.Request) ([]byte, error) {
+func (c *Client) send(req *http.Request) ([]byte, int, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
 	}
-	return io.ReadAll(resp.Body)
+	return b, resp.StatusCode, nil
 }
 
 func decodeEd25519PublicKey(b64 string) (ed25519.PublicKey, error) {
