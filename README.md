@@ -14,6 +14,8 @@ go run ./cmd/gateway   # 預設 :8080，可用 GATEWAY_ADDR 覆寫
 
 `catalog` / `cart` / `checkout` / `post-order`，掛在 `/api/mcp/<module>`。
 
+`catalog` 支援 `action: "negotiate"`（階梯議價，`on_price_negotiate` hook）：gateway 原樣透傳付費 bridge 的 `/catalog/negotiate` 回應（bridge 是計價唯一權威，含每品項 `unit_price` + `price_source` tier 明細）。免費版商店無此端點，回 502 + error 欄位 — agent 應辨識並退回固定價流程。
+
 ## 採購授權模組（閉源）
 
 `purchasing` 掛在 `/api/mcp/purchasing`，ability `purchasing:pay`，三個 action：
