@@ -24,6 +24,7 @@ var (
 	ErrCurrencyNotSupported   = errors.New("CURRENCY_NOT_SUPPORTED")
 	ErrReservationFailed      = errors.New("RESERVATION_FAILED")
 	ErrPurchaseFailed         = errors.New("PURCHASE_FAILED")
+	ErrQuoteExpired           = errors.New("QUOTE_EXPIRED")
 	ErrIdempotencyConflict    = errors.New("IDEMPOTENCY_CONFLICT")
 	ErrInvalidStateTransition = errors.New("INVALID_STATE_TRANSITION")
 	ErrAmountMismatch         = errors.New("AMOUNT_MISMATCH")
@@ -209,12 +210,13 @@ type PurchaseItem struct {
 
 // PurchaseQuote represents a verified quote from a merchant adapter.
 type PurchaseQuote struct {
-	QuoteID    string    `json:"quote_id"`
-	MerchantID string    `json:"merchant_id"`
-	Items      []PurchaseItem `json:"items"`
-	Total      int64     `json:"total"` // Verified total amount
-	Currency   string    `json:"currency"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	QuoteID    string            `json:"quote_id"`
+	MerchantID string            `json:"merchant_id"`
+	Items      []PurchaseItem   `json:"items"`
+	Total      int64             `json:"total"` // Verified total amount
+	Currency   string            `json:"currency"`
+	Categories []string          `json:"categories,omitempty"` // For scope evaluation
+	ExpiresAt  time.Time         `json:"expires_at"`
 }
 
 // PurchaseResult captures the outcome of merchant order placement.

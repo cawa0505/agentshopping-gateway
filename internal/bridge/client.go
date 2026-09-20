@@ -17,6 +17,7 @@ import (
 type Config struct {
 	BaseURL string // e.g. https://store.example/wp-json/agentshopping-bridge/v1
 	APIKey  string // shared secret issued to the store
+	StoreID string // merchant identifier used in purchasing policy scope
 }
 
 // Client calls a store bridge.
@@ -90,6 +91,84 @@ func (c *Client) Checkout(ctx context.Context, cart []CartLine) (string, error) 
 		return "", fmt.Errorf("bridge checkout rejected: %s", out.Error)
 	}
 	return out.URL, nil
+}
+
+// QuoteOrder fetches a canonical price quote from the bridge (live store
+// prices; the trusted total source for the quote-first purchase flow).
+func (c *Client) QuoteOrder(ctx context.Context, items []OrderItem) (quoteID string, total float64, currency string, categories []string, expiresAt string, err error) {
+	body := map[string]any{"items": items}
+	var out struct {
+		QuoteID    string   `json:"quote_id"`
+		Items      []OrderItem `json:"items"`
+		Total      float64  `json:"total"`
+		Currency   string   `json:"currency"`
+		Categories []string `json:"categories"`
+		ExpiresAt  string   `json:"expires_at"`
+		Error      string   `json:"error"`
+	}
+	if err = c.postJSON(ctx, c.cfg.BaseURL+"/orders/quote", body, &out); err != nil {
+		return "", 0, "", nil, "", err
+	}
+	if out.Error != "" || out.QuoteID == "" {
+		return "", 0, "", nil, "", fmt.Errorf("bridge quote rejected: %s", out.Error)
+	}
+	return out.QuoteID, out.Total, out.Currency, out.Categories, out.ExpiresAt, nil
+}
+
+// OrderItem is one autonomous-order line as the bridge expects it.
+type OrderItem struct {
+	ProductID int `json:"product_id"`
+	Qty       int `json:"qty"`
+}
+
+// CreateOrder places a fully autonomous store order paid via the store-side
+// payment token referenced by paymentMethodRef. The bridge computes the
+// canonical total from live store prices.
+func (c *Client) CreateOrder(ctx context.Context, items []OrderItem, paymentMethodRef, agentID, purchaseID string) (orderID int, status string, total float64, err error) {
+	body := map[string]any{
+		"items":              items,
+		"payment_method_ref": paymentMethodRef,
+		"metadata":           map[string]string{"agent_id": agentID, "purchase_id": purchaseID},
+	}
+	var out struct {
+		OrderID  int     `json:"order_id"`
+		Status   string  `json:"status"`
+		Total    float64 `json:"total"`
+		Currency string  `json:"currency"`
+		Error    string  `json:"error"`
+	}
+	if err = c.postJSON(ctx, c.cfg.BaseURL+"/orders", body, &out); err != nil {
+		return 0, "", 0, err
+	}
+	if out.Error != "" || out.OrderID == 0 {
+		return 0, "", 0, fmt.Errorf("bridge order rejected: %s", out.Error)
+	}
+	return out.OrderID, out.Status, out.Total, nil
+}
+
+// OrderStatus maps a bridge order to a canonical status
+// (pending / processing / completed / failed).
+func (c *Client) OrderStatus(ctx context.Context, orderID int) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := c.getJSON(ctx, fmt.Sprintf("%s/orders/status?order_id=%d", c.cfg.BaseURL, orderID), &out); err != nil {
+		return "", err
+	}
+	if out.Error != "" {
+		return "", fmt.Errorf("bridge order status: %s", out.Error)
+	}
+	return out.Status, nil
+}
+
+// CancelOrder cancels a placed order at the store (used when the live total
+// diverges from the quoted total — the reservation is then released).
+func (c *Client) CancelOrder(ctx context.Context, orderID int) error {
+	var out struct {
+		Error string `json:"error"`
+	}
+	return c.postJSON(ctx, c.cfg.BaseURL+"/orders/cancel", map[string]any{"order_id": orderID}, &out)
 }
 
 func (c *Client) getJSON(ctx context.Context, url string, out any) error {

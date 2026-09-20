@@ -628,6 +628,27 @@ func (s *Store) Allowance(ctx context.Context, bindingID string, now time.Time) 
 	return allowanceTx(ctx, s.db, bindingID, now)
 }
 
+// MarkExecuting records a successful merchant order placement: purchase →
+// EXECUTING with its merchant order reference. Capture still awaits
+// order-status confirmation.
+func (s *Store) MarkExecuting(ctx context.Context, purchaseID, merchantOrderRef string, now time.Time) error {
+	p, err := getPurchaseByID(ctx, s.db, purchaseID)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return purchasing.ErrPurchaseFailed
+	}
+	if p.Status != purchasing.PurchaseReserved {
+		return fmt.Errorf("%w: purchase %s in %s cannot enter EXECUTING", purchasing.ErrInvalidStateTransition, purchaseID, p.Status)
+	}
+	if err := p.Transition(purchasing.PurchaseExecuting, now); err != nil {
+		return err
+	}
+	p.MerchantOrderRef = merchantOrderRef
+	return persistPurchaseStatus(ctx, s.db, p)
+}
+
 // GetPurchase loads a purchase by id.
 func (s *Store) GetPurchase(ctx context.Context, id string) (*purchasing.Purchase, error) {
 	p, err := getPurchaseByID(ctx, s.db, id)
