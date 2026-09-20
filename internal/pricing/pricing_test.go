@@ -64,7 +64,7 @@ func newService(url string) *Service {
 func TestBalance(t *testing.T) {
 	f := &fakeLedger{balance: 250}
 	s := newService(f.server(t).URL)
-	bal, err := s.Balance(context.Background(), "acc-1")
+	bal, err := s.Balance(context.Background(), "tok", "acc-1")
 	if err != nil || bal != 250 {
 		t.Fatalf("balance: got %d err %v, want 250", bal, err)
 	}
@@ -76,17 +76,17 @@ func TestRedeem(t *testing.T) {
 	f := &fakeLedger{balance: 100}
 	s := newService(f.server(t).URL)
 
-	discount, remaining, err := s.Redeem(context.Background(), "acc-1", 40, "order-1")
+	discount, remaining, err := s.Redeem(context.Background(), "tok", "acc-1", 40, "order-1")
 	if err != nil || discount != 40 || remaining != 60 {
 		t.Fatalf("redeem 40: discount=%d remaining=%d err=%v, want 40/60/nil", discount, remaining, err)
 	}
 
-	_, _, err = s.Redeem(context.Background(), "acc-1", 1000, "order-2")
+	_, _, err = s.Redeem(context.Background(), "tok", "acc-1", 1000, "order-2")
 	if err != nexusledger.ErrInsufficientBalance {
 		t.Fatalf("over-redeem: got err %v, want ErrInsufficientBalance", err)
 	}
 	// Balance unchanged by the rejected spend.
-	if bal, _ := s.Balance(context.Background(), "acc-1"); bal != 60 {
+	if bal, _ := s.Balance(context.Background(), "tok", "acc-1"); bal != 60 {
 		t.Fatalf("balance after rejected redeem: got %d, want 60", bal)
 	}
 }
@@ -96,12 +96,12 @@ func TestSettleOrder(t *testing.T) {
 	f := &fakeLedger{balance: 0}
 	s := newService(f.server(t).URL)
 
-	bal, err := s.SettleOrder(context.Background(), "acc-1", 15, "order-ok", true)
+	bal, err := s.SettleOrder(context.Background(), "tok", "acc-1", 15, "order-ok", true)
 	if err != nil || bal != 15 {
 		t.Fatalf("success settle: got %d err %v, want 15", bal, err)
 	}
 
-	bal, err = s.SettleOrder(context.Background(), "acc-1", 15, "order-fail", false)
+	bal, err = s.SettleOrder(context.Background(), "tok", "acc-1", 15, "order-fail", false)
 	if err != nil || bal != 15 {
 		t.Fatalf("failed settle must not earn: got %d err %v, want 15", bal, err)
 	}

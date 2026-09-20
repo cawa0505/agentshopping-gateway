@@ -23,19 +23,20 @@ type Service struct {
 
 func New(nxl *nexusledger.Client) *Service { return &Service{nxl: nxl} }
 
-// Balance reports the account's current point balance.
-func (s *Service) Balance(ctx context.Context, account string) (int64, error) {
-	return s.nxl.Balance(ctx, account)
+// Balance reports the account's current point balance. token is the agent's
+// bearer JWT, forwarded to NexusLedger's protected ledger routes.
+func (s *Service) Balance(ctx context.Context, token, account string) (int64, error) {
+	return s.nxl.Balance(ctx, token, account)
 }
 
 // Redeem spends points and returns the discount applied plus the remaining
 // balance. Insufficient balance surfaces nexusledger.ErrInsufficientBalance and
 // applies no discount (the spend is atomic on the ledger side).
-func (s *Service) Redeem(ctx context.Context, account string, points int64, orderRef string) (discount int64, remaining int64, err error) {
+func (s *Service) Redeem(ctx context.Context, token, account string, points int64, orderRef string) (discount int64, remaining int64, err error) {
 	if points <= 0 {
 		return 0, 0, nil // nothing to redeem
 	}
-	remaining, err = s.nxl.Spend(ctx, account, points, orderRef)
+	remaining, err = s.nxl.Spend(ctx, token, account, points, orderRef)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -44,18 +45,18 @@ func (s *Service) Redeem(ctx context.Context, account string, points int64, orde
 
 // Commission credits the referrer/platform account for a completed order. It is
 // only called for successful transactions; a failed transaction never earns.
-func (s *Service) Commission(ctx context.Context, account string, amount int64, orderRef string) (int64, error) {
+func (s *Service) Commission(ctx context.Context, token, account string, amount int64, orderRef string) (int64, error) {
 	if amount <= 0 {
-		return s.Balance(ctx, account)
+		return s.Balance(ctx, token, account)
 	}
-	return s.nxl.Earn(ctx, account, amount, orderRef)
+	return s.nxl.Earn(ctx, token, account, amount, orderRef)
 }
 
 // SettleOrder is the success-gated wrapper: commission is earned only when the
 // order succeeded. A failed order is a no-op (returns current balance).
-func (s *Service) SettleOrder(ctx context.Context, account string, amount int64, orderRef string, success bool) (int64, error) {
+func (s *Service) SettleOrder(ctx context.Context, token, account string, amount int64, orderRef string, success bool) (int64, error) {
 	if !success {
-		return s.Balance(ctx, account)
+		return s.Balance(ctx, token, account)
 	}
-	return s.Commission(ctx, account, amount, orderRef)
+	return s.Commission(ctx, token, account, amount, orderRef)
 }

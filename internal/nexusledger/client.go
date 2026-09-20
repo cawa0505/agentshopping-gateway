@@ -96,7 +96,7 @@ func (c *Client) FetchJWKS(ctx context.Context) (*JWKS, error) {
 		return c.keys, nil
 	}
 
-	body, err := c.httpGet(ctx, c.cfg.jwksURL())
+	body, err := c.httpGet(ctx, "", c.cfg.jwksURL())
 	if err != nil {
 		if c.keys == nil {
 			return nil, fmt.Errorf("fetch jwks: %w", err)
@@ -121,11 +121,12 @@ func (c *Client) FetchJWKS(ctx context.Context) (*JWKS, error) {
 	return &jwks, nil
 }
 
-// CheckAbility reports whether the agent owns a wildcard/role that grants the
-// required ability.
-func (c *Client) CheckAbility(ctx context.Context, agent, required string) (bool, error) {
-	payload := map[string]any{"owned": []string{agent}, "required": required}
-	body, err := c.httpPostJSON(ctx, c.cfg.abilitiesURL(), payload)
+// CheckAbility reports whether the owned abilities (from the agent's verified
+// JWT `abilities` claim) grant the required ability. NexusLedger evaluates
+// wildcard/role expansion via HasAbility(owned, required).
+func (c *Client) CheckAbility(ctx context.Context, owned []string, required string) (bool, error) {
+	payload := map[string]any{"owned": owned, "required": required}
+	body, err := c.httpPostJSON(ctx, "", c.cfg.abilitiesURL(), payload)
 	if err != nil {
 		return false, fmt.Errorf("ability check %q: %w", required, err)
 	}
@@ -138,9 +139,10 @@ func (c *Client) CheckAbility(ctx context.Context, agent, required string) (bool
 	return res.Allowed, nil
 }
 
-// Balance returns the integer point balance for an account.
-func (c *Client) Balance(ctx context.Context, id string) (int64, error) {
-	body, err := c.httpGet(ctx, c.cfg.balanceURL(id))
+// Balance returns the integer point balance for an account. The ledger routes
+// are bearer-protected, so the agent's token must be supplied.
+func (c *Client) Balance(ctx context.Context, token, id string) (int64, error) {
+	body, err := c.httpGet(ctx, token, c.cfg.balanceURL(id))
 	if err != nil {
 		return 0, fmt.Errorf("balance %s: %w", id, err)
 	}
@@ -182,22 +184,22 @@ func (c *Client) VerifyIdentity(ctx context.Context, token string) (map[string]a
 
 // Earn credits points to an account (e.g. transaction commission). Returns the
 // post-entry account balance.
-func (c *Client) Earn(ctx context.Context, id string, amount int64, ref string) (int64, error) {
-	return c.ledgerWrite(ctx, c.cfg.ledgerURL(id, "earn"), amount, ref)
+func (c *Client) Earn(ctx context.Context, token, id string, amount int64, ref string) (int64, error) {
+	return c.ledgerWrite(ctx, token, c.cfg.ledgerURL(id, "earn"), amount, ref)
 }
 
 // Spend debits points from an account (e.g. point redemption / discount).
 // Returns ErrInsufficientBalance when NexusLedger rejects with 409.
-func (c *Client) Spend(ctx context.Context, id string, amount int64, ref string) (int64, error) {
-	return c.ledgerWrite(ctx, c.cfg.ledgerURL(id, "spend"), amount, ref)
+func (c *Client) Spend(ctx context.Context, token, id string, amount int64, ref string) (int64, error) {
+	return c.ledgerWrite(ctx, token, c.cfg.ledgerURL(id, "spend"), amount, ref)
 }
 
-func (c *Client) ledgerWrite(ctx context.Context, url string, amount int64, ref string) (int64, error) {
+func (c *Client) ledgerWrite(ctx context.Context, token, url string, amount int64, ref string) (int64, error) {
 	payload := map[string]any{"amount": amount}
 	if ref != "" {
 		payload["reference_id"] = ref
 	}
-	body, status, err := c.postJSON(ctx, url, payload)
+	body, status, err := c.postJSON(ctx, token, url, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -218,18 +220,25 @@ func (c *Client) ledgerWrite(ctx context.Context, url string, amount int64, ref 
 
 // --- HTTP helpers ---
 
-func (c *Client) setSite(req *http.Request) {
-	if c.cfg.SiteID != "" {
-		req.Header.Set("X-Site-ID", c.cfg.SiteID)
+// setHeaders always sends X-Site-ID (NexusLedger's /v1 scope middleware rejects
+// requests it cannot resolve to a site) and attaches a bearer token when given.
+func (c *Client) setHeaders(req *http.Request, token string) {
+	site := c.cfg.SiteID
+	if site == "" {
+		site = "default"
+	}
+	req.Header.Set("X-Site-ID", site)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 }
 
-func (c *Client) httpGet(ctx context.Context, url string) ([]byte, error) {
+func (c *Client) httpGet(ctx context.Context, token, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	c.setSite(req)
+	c.setHeaders(req, token)
 	body, status, err := c.send(req)
 	if err != nil {
 		return nil, err
@@ -241,8 +250,8 @@ func (c *Client) httpGet(ctx context.Context, url string) ([]byte, error) {
 }
 
 // httpPostJSON posts and treats any >=400 as an error (ability/generic use).
-func (c *Client) httpPostJSON(ctx context.Context, url string, payload any) ([]byte, error) {
-	body, status, err := c.postJSON(ctx, url, payload)
+func (c *Client) httpPostJSON(ctx context.Context, token, url string, payload any) ([]byte, error) {
+	body, status, err := c.postJSON(ctx, token, url, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +263,7 @@ func (c *Client) httpPostJSON(ctx context.Context, url string, payload any) ([]b
 
 // postJSON posts and returns the raw status so callers can branch on it
 // (e.g. ledger spend 409). It does not treat >=400 as a transport error.
-func (c *Client) postJSON(ctx context.Context, url string, payload any) ([]byte, int, error) {
+func (c *Client) postJSON(ctx context.Context, token, url string, payload any) ([]byte, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, err
@@ -264,7 +273,7 @@ func (c *Client) postJSON(ctx context.Context, url string, payload any) ([]byte,
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.setSite(req)
+	c.setHeaders(req, token)
 	return c.send(req)
 }
 

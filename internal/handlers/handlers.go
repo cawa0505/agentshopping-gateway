@@ -68,7 +68,8 @@ func (d Deps) Checkout(w http.ResponseWriter, r *http.Request) {
 
 	var discount int64
 	if req.RedeemPoints > 0 {
-		d2, _, err := d.Pricing.Redeem(r.Context(), req.Account, req.RedeemPoints, req.OrderRef)
+		token, _ := auth.Token(r.Context())
+		d2, _, err := d.Pricing.Redeem(r.Context(), token, req.Account, req.RedeemPoints, req.OrderRef)
 		if err != nil {
 			writeErr(w, http.StatusConflict, "redeem failed: "+err.Error())
 			return
@@ -100,7 +101,8 @@ func (d Deps) PostOrder(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "identity required")
 		return
 	}
-	balance, err := d.Pricing.SettleOrder(r.Context(), req.Account, req.Amount, req.OrderRef, req.Success)
+	token, _ := auth.Token(r.Context())
+	balance, err := d.Pricing.SettleOrder(r.Context(), token, req.Account, req.Amount, req.OrderRef, req.Success)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

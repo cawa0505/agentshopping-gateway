@@ -23,7 +23,6 @@ import (
 type fakeNXL struct {
 	priv    ed25519.PrivateKey
 	pub     ed25519.PublicKey
-	allowed map[string]bool
 	balance int64
 }
 
@@ -31,6 +30,7 @@ func (f *fakeNXL) sign(t *testing.T) string {
 	t.Helper()
 	tok, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{
 		"sub": "agent-1", "exp": time.Now().Add(time.Hour).Unix(),
+		"abilities": []string{"cart:write", "checkout:pay", "post-order:read"},
 	}).SignedString(f.priv)
 	if err != nil {
 		t.Fatal(err)
@@ -48,11 +48,18 @@ func (f *fakeNXL) server(t *testing.T) *httptest.Server {
 		}}})
 	})
 	mux.HandleFunc("/v1/abilities/check", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Required string `json:"required"` }
+		var req struct {
+			Owned    []string `json:"owned"`
+			Required string   `json:"required"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": f.allowed[req.Required]})
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": contains(req.Owned, req.Required)})
 	})
 	mux.HandleFunc("/v1/ledger/accounts/{id}/spend", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		var req struct{ Amount int64 `json:"amount"` }
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Amount > f.balance {
@@ -64,6 +71,10 @@ func (f *fakeNXL) server(t *testing.T) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{"balance_after": f.balance})
 	})
 	mux.HandleFunc("/v1/ledger/accounts/{id}/earn", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		var req struct{ Amount int64 `json:"amount"` }
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.balance += req.Amount
@@ -118,8 +129,7 @@ func post(t *testing.T, url, token string, body any) (*http.Response, map[string
 // 5.1 — full flow: anonymous search → cart → checkout(redeem) → post-order settle.
 func TestEndToEndFlow(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	nxlSrv := &fakeNXL{priv: priv, pub: pub, balance: 500,
-		allowed: map[string]bool{"cart:write": true, "checkout:pay": true, "post-order:read": true}}
+	nxlSrv := &fakeNXL{priv: priv, pub: pub, balance: 500}
 	nxURL := nxlSrv.server(t).URL
 	brURL := fakeBridge(t).URL
 
@@ -174,4 +184,13 @@ func TestEndToEndFlow(t *testing.T) {
 	if out["balance"].(float64) != 435 {
 		t.Fatalf("post-order balance: want 435, got %v", out["balance"])
 	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

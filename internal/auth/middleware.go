@@ -12,13 +12,38 @@ import (
 	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
 )
 
-// ctxKey is the private type for request-scoped claims.
+// ctxKey is the private type for request-scoped claims and token.
 type ctxKey struct{}
+type tokenKey struct{}
 
 // Claims pulls the verified identity claims from a request context, if any.
 func Claims(ctx context.Context) (map[string]any, bool) {
 	c, ok := ctx.Value(ctxKey{}).(map[string]any)
 	return c, ok
+}
+
+// Token pulls the raw verified bearer token from a request context, if any.
+// Downstream ledger calls forward it, since NexusLedger's ledger routes are
+// bearer-protected.
+func Token(ctx context.Context) (string, bool) {
+	t, ok := ctx.Value(tokenKey{}).(string)
+	return t, ok
+}
+
+// abilitiesFromClaims reads the NexusLedger `abilities` claim ([]string) from a
+// verified token.
+func abilitiesFromClaims(claims map[string]any) []string {
+	raw, ok := claims["abilities"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, a := range raw {
+		if s, ok := a.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Requirement declares what a route needs.
@@ -60,8 +85,8 @@ func Middleware(nxl *nexusledger.Client, req Requirement, next http.Handler) htt
 		}
 
 		if req.Ability != "" {
-			agent, _ := claims["sub"].(string)
-			ok, err := nxl.CheckAbility(r.Context(), agent, req.Ability)
+			owned := abilitiesFromClaims(claims)
+			ok, err := nxl.CheckAbility(r.Context(), owned, req.Ability)
 			if err != nil || !ok {
 				http.Error(w, "ability "+req.Ability+" required", http.StatusForbidden)
 				return
@@ -69,6 +94,7 @@ func Middleware(nxl *nexusledger.Client, req Requirement, next http.Handler) htt
 		}
 
 		ctx := context.WithValue(r.Context(), ctxKey{}, map[string]any(claims))
+		ctx = context.WithValue(ctx, tokenKey{}, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

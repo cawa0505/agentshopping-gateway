@@ -117,11 +117,11 @@ func TestCheckAbility(t *testing.T) {
 	defer srv.Close()
 	client := newClient(srv.URL)
 
-	allowed, err := client.CheckAbility(context.Background(), "agent-1", "catalog:read")
+	allowed, err := client.CheckAbility(context.Background(), []string{"catalog:read", "cart:write"}, "catalog:read")
 	if err != nil || !allowed {
 		t.Fatalf("expected catalog:read allowed: %v %v", allowed, err)
 	}
-	denied, err := client.CheckAbility(context.Background(), "agent-1", "checkout:pay")
+	denied, err := client.CheckAbility(context.Background(), []string{"catalog:read"}, "checkout:pay")
 	if err != nil || denied {
 		t.Fatalf("expected checkout:pay denied: %v %v", denied, err)
 	}
@@ -133,7 +133,7 @@ func TestBalance(t *testing.T) {
 	defer srv.Close()
 	client := newClient(srv.URL)
 
-	bal, err := client.Balance(context.Background(), "any")
+	bal, err := client.Balance(context.Background(), "tok", "any")
 	if err != nil || bal != 100 {
 		t.Fatalf("expected balance 100: %v %v", bal, err)
 	}
