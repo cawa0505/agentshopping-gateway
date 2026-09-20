@@ -1,11 +1,13 @@
 // Package router wires the AgentShopping standard protocol modules onto a
-// stdlib http.ServeMux, guarding module routes with NexusLedger auth.
+// stdlib http.ServeMux, guarding module routes with NexusLedger auth and
+// dispatching to the store bridge + ledger pricing handlers.
 package router
 
 import (
 	"net/http"
 
 	"github.com/cawa0505/agentshopping-gateway/internal/auth"
+	"github.com/cawa0505/agentshopping-gateway/internal/handlers"
 	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
 )
 
@@ -28,9 +30,9 @@ var moduleReq = map[string]auth.Requirement{
 }
 
 // New returns the gateway HTTP handler. Health and unknown paths bypass auth;
-// module routes are wrapped with NexusLedger identity/ability middleware.
-// Real bridge dispatch replaces the placeholder handlers in task 3.
-func New(nxl *nexusledger.Client) *http.ServeMux {
+// module routes are wrapped with NexusLedger identity/ability middleware and
+// dispatch to the bridge + pricing handlers.
+func New(nxl *nexusledger.Client, deps handlers.Deps) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -38,14 +40,15 @@ func New(nxl *nexusledger.Client) *http.ServeMux {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	handler := map[string]http.HandlerFunc{
+		Catalog:   deps.Catalog,
+		Cart:      deps.Cart,
+		Checkout:  deps.Checkout,
+		PostOrder: deps.PostOrder,
+	}
 	for _, m := range []string{Catalog, Cart, Checkout, PostOrder} {
-		// ponytail: placeholder module handler — real bridge dispatch lands in task 3.
-		mux.Handle("POST /api/mcp/"+m, auth.Middleware(nxl, moduleReq[m], http.HandlerFunc(notImplemented)))
+		mux.Handle("POST /api/mcp/"+m, auth.Middleware(nxl, moduleReq[m], handler[m]))
 	}
 
 	return mux
-}
-
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
 }

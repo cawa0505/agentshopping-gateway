@@ -7,7 +7,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/cawa0505/agentshopping-gateway/internal/bridge"
+	"github.com/cawa0505/agentshopping-gateway/internal/handlers"
 	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
+	"github.com/cawa0505/agentshopping-gateway/internal/pricing"
 	"github.com/cawa0505/agentshopping-gateway/internal/router"
 )
 
@@ -19,11 +22,20 @@ func main() {
 	nxl := nexusledger.New(nexusledger.Config{
 		BaseURL: os.Getenv("NXL_BASE_URL"),
 		JWKSURL: os.Getenv("NXL_JWKS_URL"),
+		SiteID:  os.Getenv("NXL_SITE_ID"),
 		JWKSTTL: 5 * time.Minute,
 	})
 
+	deps := handlers.Deps{
+		Bridge: bridge.New(bridge.Config{
+			BaseURL: os.Getenv("BRIDGE_BASE_URL"),
+			APIKey:  os.Getenv("BRIDGE_API_KEY"),
+		}),
+		Pricing: pricing.New(nxl),
+	}
+
 	log.Printf("agentshopping-gateway listening on %s", addr)
-	if err := http.ListenAndServe(addr, router.New(nxl)); err != nil {
+	if err := http.ListenAndServe(addr, router.New(nxl, deps)); err != nil {
 		log.Fatal(err)
 	}
 }

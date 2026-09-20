@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cawa0505/agentshopping-gateway/internal/bridge"
+	"github.com/cawa0505/agentshopping-gateway/internal/handlers"
 	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
+	"github.com/cawa0505/agentshopping-gateway/internal/pricing"
 )
 
 // testClient points at an unreachable NexusLedger; these tests only exercise
@@ -16,8 +19,18 @@ func testClient() *nexusledger.Client {
 	return nexusledger.New(nexusledger.Config{BaseURL: "http://127.0.0.1:0", JWKSTTL: time.Second})
 }
 
+func testDeps() handlers.Deps {
+	c := testClient()
+	return handlers.Deps{
+		Bridge:  bridge.New(bridge.Config{BaseURL: "http://127.0.0.1:0"}),
+		Pricing: pricing.New(c),
+	}
+}
+
+func newTestMux() *http.ServeMux { return New(testClient(), testDeps()) }
+
 func TestUnknownPathReturns404(t *testing.T) {
-	srv := httptest.NewServer(New(testClient()))
+	srv := httptest.NewServer(newTestMux())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/mcp/does-not-exist")
@@ -31,7 +44,7 @@ func TestUnknownPathReturns404(t *testing.T) {
 }
 
 func TestHealthOK(t *testing.T) {
-	srv := httptest.NewServer(New(testClient()))
+	srv := httptest.NewServer(newTestMux())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/health")
@@ -45,7 +58,7 @@ func TestHealthOK(t *testing.T) {
 }
 
 func TestKnownModuleRoutes(t *testing.T) {
-	srv := httptest.NewServer(New(testClient()))
+	srv := httptest.NewServer(newTestMux())
 	defer srv.Close()
 
 	for _, m := range []string{Catalog, Cart, Checkout, PostOrder} {
