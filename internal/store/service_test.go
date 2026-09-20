@@ -91,6 +91,98 @@ func TestPurchaseHappyPathCaptures(t *testing.T) {
 	}
 }
 
+func TestPurchaseAccessDeniedForForeignAgent(t *testing.T) {
+	now := time.Now().UTC()
+	adapter := &fakeMerchantAdapter{
+		quote: &purchasing.PurchaseQuote{
+			QuoteID: "qt_1", MerchantID: "wc-shop-1", Total: 500, Currency: "TWD",
+			Categories: []string{"books"}, ExpiresAt: now.Add(time.Minute),
+		},
+	}
+	s := testStore(t)
+	svc := NewService(s, adapter, func() time.Time { return now })
+	b := testBinding(t, s, func(b *purchasing.AuthBinding, p *purchasing.AuthorizationPolicy) {
+		b.AgentID = "agent-owner"
+	})
+
+	_, err := svc.Store.Reserve(context.Background(), ReserveInput{
+		BindingID: b.ID, QuoteID: "qt_x", IdempotencyKey: "idem-x",
+		AgentID: "agent-other", Currency: "TWD", Amount: 500, RequestedAt: now,
+		MerchantID: "wc-shop-1", Categories: []string{"books"},
+	})
+	if err != purchasing.ErrBindingAccessDenied {
+		t.Fatalf("err = %v, want ErrBindingAccessDenied", err)
+	}
+
+	// Delegated agent passes the ownership gate.
+	res, err := svc.Store.Reserve(context.Background(), ReserveInput{
+		BindingID: b.ID, QuoteID: "qt_x", IdempotencyKey: "idem-x",
+		AgentID: "agent-owner", Currency: "TWD", Amount: 500, RequestedAt: now,
+		MerchantID: "wc-shop-1", Categories: []string{"books"},
+	})
+	if err != nil || res.IdempotentRe {
+		t.Fatalf("owner agent reserve: err=%v idem=%v", err, res.IdempotentRe)
+	}
+}
+
+func TestReconcileExecutingCapturesAndReleases(t *testing.T) {
+	now := time.Now().UTC()
+	adapter := &fakeMerchantAdapter{
+		quote: &purchasing.PurchaseQuote{
+			QuoteID: "qt_1", MerchantID: "wc-shop-1", Total: 500, Currency: "TWD",
+			Categories: []string{"books"}, ExpiresAt: now.Add(time.Minute),
+		},
+		order: &purchasing.PurchaseResult{Success: true, MerchantOrderRef: "wc-100"},
+		// Merchant still pending at purchase time → stays EXECUTING.
+		statuses: map[string]string{"wc-100": "pending"},
+	}
+	s := testStore(t)
+	svc := NewService(s, adapter, func() time.Time { return now })
+	b := testBinding(t, s, nil)
+
+	out, err := svc.Purchase(context.Background(), PurchaseRequest{
+		BindingID: b.ID, AgentID: "agent-a", MerchantID: "wc-shop-1",
+		Items: []purchasing.PurchaseItem{{ProductID: "p-1", Quantity: 1}},
+		Currency: "TWD", Amount: 500, IdempotencyKey: "idem-r1",
+	})
+	if err != nil || out.Status != purchasing.PurchaseExecuting {
+		t.Fatalf("purchase = %+v err=%v", out, err)
+	}
+
+	// Merchant flips to processing → reconcile captures.
+	adapter.statuses["wc-100"] = "processing"
+	settled, err := svc.ReconcileExecuting(context.Background())
+	if err != nil || len(settled) != 1 || settled[0].Status != purchasing.PurchaseCaptured {
+		t.Fatalf("reconcile capture = %+v err=%v", settled, err)
+	}
+	snap, _ := svc.GetAllowance(context.Background(), b.ID)
+	if snap.Available != 5000-500 || snap.Captured != 500 {
+		t.Fatalf("allowance after capture = %+v", snap)
+	}
+
+	// A second purchase whose order is pending at purchase time, then fails
+	// at the merchant → reconcile releases.
+	adapter.order = &purchasing.PurchaseResult{Success: true, MerchantOrderRef: "wc-101"}
+	adapter.statuses["wc-101"] = "pending"
+	out2, err := svc.Purchase(context.Background(), PurchaseRequest{
+		BindingID: b.ID, AgentID: "agent-a", MerchantID: "wc-shop-1",
+		Items: []purchasing.PurchaseItem{{ProductID: "p-1", Quantity: 1}},
+		Currency: "TWD", Amount: 500, IdempotencyKey: "idem-r2",
+	})
+	if err != nil || out2.Status != purchasing.PurchaseExecuting {
+		t.Fatalf("purchase2 = %+v err=%v", out2, err)
+	}
+	adapter.statuses["wc-101"] = "failed"
+	settled, err = svc.ReconcileExecuting(context.Background())
+	if err != nil || len(settled) != 1 || settled[0].Status != purchasing.PurchaseReleased {
+		t.Fatalf("reconcile release = %+v err=%v", settled, err)
+	}
+	snap, _ = svc.GetAllowance(context.Background(), b.ID)
+	if snap.Available != 5000-500 || snap.ActiveReserves != 0 {
+		t.Fatalf("allowance after release = %+v", snap)
+	}
+}
+
 func TestPurchaseAmountMismatchRejectsWithoutSideEffects(t *testing.T) {
 	now := time.Now().UTC()
 	adapter := &fakeMerchantAdapter{

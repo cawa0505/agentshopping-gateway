@@ -28,6 +28,7 @@ var (
 	ErrIdempotencyConflict    = errors.New("IDEMPOTENCY_CONFLICT")
 	ErrInvalidStateTransition = errors.New("INVALID_STATE_TRANSITION")
 	ErrAmountMismatch         = errors.New("AMOUNT_MISMATCH")
+	ErrBindingAccessDenied    = errors.New("BINDING_ACCESS_DENIED")
 )
 
 // BindingStatus represents the lifecycle state of an AuthBinding.
@@ -81,6 +82,7 @@ const (
 type AuthBinding struct {
 	ID               string        `json:"id"`
 	UserID           string        `json:"user_id"`
+	AgentID          string        `json:"agent_id"` // Delegated agent's JWT sub; server-side enforced on every use
 	PaymentMethodRef string        `json:"payment_method_ref"` // Opaque store/provider token
 	Currency         string        `json:"currency"`           // e.g., "TWD", "USD"
 	Status           BindingStatus `json:"status"`

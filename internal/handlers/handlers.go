@@ -10,12 +10,14 @@ import (
 	"github.com/cawa0505/agentshopping-gateway/internal/auth"
 	"github.com/cawa0505/agentshopping-gateway/internal/bridge"
 	"github.com/cawa0505/agentshopping-gateway/internal/pricing"
+	"github.com/cawa0505/agentshopping-gateway/internal/store"
 )
 
 // Deps holds the collaborators the module handlers need.
 type Deps struct {
-	Bridge  *bridge.Client
-	Pricing *pricing.Service
+	Bridge     *bridge.Client
+	Pricing    *pricing.Service
+	Purchasing *store.Service
 }
 
 // Catalog handles search + inventory reads (anonymous browsing allowed).

@@ -153,14 +153,81 @@ func (s *Service) Purchase(ctx context.Context, req PurchaseRequest) (*PurchaseO
 	return &PurchaseOutcome{Purchase: res.Purchase, Status: purchasing.PurchaseExecuting}, nil
 }
 
+// ReconcileExecuting re-polls every EXECUTING purchase's merchant order
+// status and settles it: paid/processing → CAPTURED, failed → RELEASED.
+// Purchases still pending at the merchant are left in EXECUTING.
+func (s *Service) ReconcileExecuting(ctx context.Context) ([]*purchasing.Purchase, error) {
+	purchases, err := s.Store.ListExecuting(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var settled []*purchasing.Purchase
+	for _, p := range purchases {
+		if p.MerchantOrderRef == "" {
+			continue
+		}
+		status, err := s.Adapter.GetOrderStatus(p.MerchantOrderRef)
+		if err != nil {
+			continue // transient merchant error; retry next sweep
+		}
+		now := s.Now()
+		switch status {
+		case "processing", "completed", "paid":
+			if err := s.Store.CaptureReservation(ctx, p.ID, now); err != nil {
+				return settled, err
+			}
+			p.Status = purchasing.PurchaseCaptured
+			settled = append(settled, p)
+		case "failed", "cancelled", "trash":
+			if err := s.Store.ReleaseReservation(ctx, p.ID, now); err != nil {
+				return settled, err
+			}
+			p.Status = purchasing.PurchaseReleased
+			settled = append(settled, p)
+		}
+	}
+	return settled, nil
+}
+
 // GetAllowance returns the derived allowance snapshot for a binding.
 func (s *Service) GetAllowance(ctx context.Context, bindingID string) (*AllowanceSnapshot, error) {
+	return s.Store.Allowance(ctx, bindingID, s.Now())
+}
+
+// GetAllowanceForAgent returns the allowance snapshot only when the binding
+// belongs to the requesting agent (spec 7.2: agents cannot probe bindings
+// they are not delegated to).
+func (s *Service) GetAllowanceForAgent(ctx context.Context, bindingID, agentID string) (*AllowanceSnapshot, error) {
+	b, err := s.Store.GetBinding(ctx, bindingID)
+	if err != nil {
+		return nil, err
+	}
+	if b.AgentID != agentID {
+		return nil, purchasing.ErrBindingAccessDenied
+	}
 	return s.Store.Allowance(ctx, bindingID, s.Now())
 }
 
 // GetPurchase returns a persisted purchase by id.
 func (s *Service) GetPurchase(ctx context.Context, id string) (*purchasing.Purchase, error) {
 	return s.Store.GetPurchase(ctx, id)
+}
+
+// GetPurchaseForAgent returns the purchase only when its binding belongs to
+// the requesting agent (spec 7.2).
+func (s *Service) GetPurchaseForAgent(ctx context.Context, id, agentID string) (*purchasing.Purchase, error) {
+	p, err := s.Store.GetPurchase(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	b, err := s.Store.GetBinding(ctx, p.BindingID)
+	if err != nil {
+		return nil, err
+	}
+	if b.AgentID != agentID {
+		return nil, purchasing.ErrBindingAccessDenied
+	}
+	return p, nil
 }
 
 func outcomeError(status purchasing.PurchaseStatus) string {

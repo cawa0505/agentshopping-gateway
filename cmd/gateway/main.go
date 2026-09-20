@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
 	"github.com/cawa0505/agentshopping-gateway/internal/pricing"
 	"github.com/cawa0505/agentshopping-gateway/internal/router"
+	"github.com/cawa0505/agentshopping-gateway/internal/store"
 )
 
 func main() {
@@ -32,6 +34,27 @@ func main() {
 			APIKey:  os.Getenv("BRIDGE_API_KEY"),
 		}),
 		Pricing: pricing.New(nxl),
+	}
+
+	// Delegated purchasing (closed-source core): SQLite-backed authorization
+	// service + WooCommerce merchant adapter over the store bridge.
+	if dsn := os.Getenv("PURCHASING_DB"); dsn != "" {
+		st, err := store.New(dsn)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer st.Close()
+		adapter := bridge.NewWooCommerceAdapter(deps.Bridge)
+		deps.Purchasing = store.NewService(st, adapter, time.Now)
+		// Reconcile sweep: settle EXECUTING purchases whose merchant order
+		// status has advanced (paid → CAPTURED, failed → RELEASED).
+		go func() {
+			for range time.Tick(time.Minute) {
+				if _, err := deps.Purchasing.ReconcileExecuting(context.Background()); err != nil {
+					log.Printf("purchasing reconcile: %v", err)
+				}
+			}
+		}()
 	}
 
 	log.Printf("agentshopping-gateway listening on %s", addr)

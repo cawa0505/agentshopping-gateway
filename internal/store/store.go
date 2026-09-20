@@ -28,6 +28,7 @@ var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS auth_bindings (
 		id                 TEXT PRIMARY KEY,
 		user_id            TEXT NOT NULL,
+		agent_id           TEXT NOT NULL DEFAULT '',
 		payment_method_ref TEXT NOT NULL,
 		currency           TEXT NOT NULL,
 		status             TEXT NOT NULL,
@@ -171,9 +172,9 @@ func (s *Store) CreateBinding(ctx context.Context, b *purchasing.AuthBinding, p 
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO auth_bindings (id, user_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		b.ID, b.UserID, b.PaymentMethodRef, b.Currency, string(b.Status), b.MerchantID,
+		`INSERT INTO auth_bindings (id, user_id, agent_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.ID, b.UserID, b.AgentID, b.PaymentMethodRef, b.Currency, string(b.Status), b.MerchantID,
 		b.CreatedAt.Unix(), unixOpt(b.ExpiresAt), unixOpt(b.RevokedAt),
 	); err != nil {
 		return fmt.Errorf("insert binding: %w", err)
@@ -203,7 +204,7 @@ func (s *Store) CreateBinding(ctx context.Context, b *purchasing.AuthBinding, p 
 // GetBinding loads a binding by id.
 func (s *Store) GetBinding(ctx context.Context, id string) (*purchasing.AuthBinding, error) {
 	return scanBinding(s.db.QueryRowContext(ctx,
-		`SELECT id, user_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
+		`SELECT id, user_id, agent_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
 		 FROM auth_bindings WHERE id = ?`, id))
 }
 
@@ -261,7 +262,7 @@ func (s *Store) terminalTransition(ctx context.Context, id string, target purcha
 	defer tx.Rollback()
 
 	b, err := scanBinding(tx.QueryRowContext(ctx,
-		`SELECT id, user_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
+		`SELECT id, user_id, agent_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
 		 FROM auth_bindings WHERE id = ?`, id))
 	if err != nil {
 		return err
@@ -376,7 +377,7 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 
 	// 2. Load binding (+ lazy expiry) and policy.
 	b, err := scanBinding(tx.QueryRowContext(ctx,
-		`SELECT id, user_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
+		`SELECT id, user_id, agent_id, payment_method_ref, currency, status, merchant_id, created_at, expires_at, revoked_at
 		 FROM auth_bindings WHERE id = ?`, in.BindingID))
 	if err != nil {
 		return nil, err
@@ -384,6 +385,11 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 	if b.Status == purchasing.BindingActive && b.ExpiresAt != nil && !now.Before(*b.ExpiresAt) {
 		// Lazy expiry: reject; status flip happens via ExpireBindingDue sweep.
 		return nil, purchasing.ErrBindingExpired
+	}
+	// Server-side ownership: an agent may only use the binding it was
+	// delegated (spec: agent must never access another user's binding).
+	if b.AgentID != "" && in.AgentID != b.AgentID {
+		return nil, purchasing.ErrBindingAccessDenied
 	}
 	policy, err := getPolicyTx(ctx, tx, in.BindingID)
 	if err != nil {
@@ -661,6 +667,26 @@ func (s *Store) GetPurchase(ctx context.Context, id string) (*purchasing.Purchas
 	return p, nil
 }
 
+// ListExecuting returns all purchases in EXECUTING state (reconcile sweep input).
+func (s *Store) ListExecuting(ctx context.Context) ([]*purchasing.Purchase, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, binding_id, quote_id, idempotency_key, agent_id, currency, amount, status, merchant_order_ref, created_at, updated_at
+		 FROM purchases WHERE status = ?`, string(purchasing.PurchaseExecuting))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*purchasing.Purchase
+	for rows.Next() {
+		p, err := scanPurchase(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // LedgerEvents loads the binding's ledger events, oldest first.
 func (s *Store) LedgerEvents(ctx context.Context, bindingID string) ([]purchasing.LedgerEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -936,7 +962,7 @@ func scanBinding(row scanner) (*purchasing.AuthBinding, error) {
 		exp      sql.NullInt64
 		revoked  sql.NullInt64
 	)
-	if err := row.Scan(&b.ID, &b.UserID, &b.PaymentMethodRef, &b.Currency, &status, &b.MerchantID, &created, &exp, &revoked); err != nil {
+	if err := row.Scan(&b.ID, &b.UserID, &b.AgentID, &b.PaymentMethodRef, &b.Currency, &status, &b.MerchantID, &created, &exp, &revoked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, purchasing.ErrBindingNotFound
 		}

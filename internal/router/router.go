@@ -13,20 +13,22 @@ import (
 
 // Module names of the AgentShopping standard protocol.
 const (
-	Catalog   = "catalog"
-	Cart      = "cart"
-	Checkout  = "checkout"
-	PostOrder = "post-order"
+	Catalog    = "catalog"
+	Cart       = "cart"
+	Checkout   = "checkout"
+	PostOrder  = "post-order"
+	Purchasing = "purchasing"
 )
 
 // moduleReq maps each standard module to its auth requirement. Catalog is
 // read-only (anonymous browsing allowed); cart/checkout/post-order require a
 // valid agent identity plus the matching ability.
 var moduleReq = map[string]auth.Requirement{
-	Catalog:   {ReadOnly: true},
-	Cart:      {Ability: "cart:write"},
-	Checkout:  {Ability: "checkout:pay"},
-	PostOrder: {Ability: "post-order:read"},
+	Catalog:    {ReadOnly: true},
+	Cart:       {Ability: "cart:write"},
+	Checkout:   {Ability: "checkout:pay"},
+	PostOrder:  {Ability: "post-order:read"},
+	Purchasing: {Ability: "purchasing:pay"},
 }
 
 // New returns the gateway HTTP handler. Health and unknown paths bypass auth;
@@ -41,12 +43,13 @@ func New(nxl *nexusledger.Client, deps handlers.Deps) *http.ServeMux {
 	})
 
 	handler := map[string]http.HandlerFunc{
-		Catalog:   deps.Catalog,
-		Cart:      deps.Cart,
-		Checkout:  deps.Checkout,
-		PostOrder: deps.PostOrder,
+		Catalog:    deps.Catalog,
+		Cart:       deps.Cart,
+		Checkout:   deps.Checkout,
+		PostOrder:  deps.PostOrder,
+		Purchasing: deps.PurchasingModule,
 	}
-	for _, m := range []string{Catalog, Cart, Checkout, PostOrder} {
+	for _, m := range []string{Catalog, Cart, Checkout, PostOrder, Purchasing} {
 		mux.Handle("POST /api/mcp/"+m, auth.Middleware(nxl, moduleReq[m], handler[m]))
 	}
 
