@@ -23,9 +23,23 @@ type Deps struct {
 // Catalog handles search + inventory reads (anonymous browsing allowed).
 func (d Deps) Catalog(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Keyword string `json:"keyword"`
+		Keyword string            `json:"keyword"`
+		Action  string            `json:"action"`
+		Items   []bridge.OrderItem `json:"items"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Tier negotiation rides the catalog module (on_price_negotiate hook):
+	// the bridge is the pricing authority, the gateway passes the response
+	// through unchanged.
+	if req.Action == "negotiate" {
+		out, err := d.Bridge.NegotiateTier(r.Context(), req.Items)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	products, err := d.Bridge.Search(r.Context(), req.Keyword)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())

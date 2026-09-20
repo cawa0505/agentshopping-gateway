@@ -60,7 +60,9 @@ func (f *fakeNXL) server(t *testing.T) *httptest.Server {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		var req struct{ Amount int64 `json:"amount"` }
+		var req struct {
+			Amount int64 `json:"amount"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Amount > f.balance {
 			http.Error(w, "insufficient", http.StatusConflict)
@@ -75,7 +77,9 @@ func (f *fakeNXL) server(t *testing.T) *httptest.Server {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		var req struct{ Amount int64 `json:"amount"` }
+		var req struct {
+			Amount int64 `json:"amount"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.balance += req.Amount
 		w.WriteHeader(http.StatusCreated)
@@ -103,6 +107,26 @@ func fakeBridge(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("POST /checkout", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"url": "https://store.example/checkout?agentshopping_cart=1:2", "ok": true})
+	})
+	mux.HandleFunc("POST /catalog/negotiate", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Items []map[string]any `json:"items"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Items) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "items required"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"quote_id":   "qt_tier1",
+			"items":      []map[string]any{{"product_id": 1, "qty": 12, "unit_price": 315.0, "price_source": "tier"}},
+			"total":      3780.0,
+			"currency":   "TWD",
+			"categories": []string{"15"},
+			"expires_at": "2026-09-21T00:00:00Z",
+			"negotiated": true,
+		})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -193,4 +217,75 @@ func contains(xs []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// 2.1 — catalog negotiate: gateway forwards to the bridge and passes the
+// tier response through unchanged (bridge is the pricing authority).
+func TestCatalogNegotiatePassthrough(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	nxlSrv := &fakeNXL{priv: priv, pub: pub, balance: 500}
+	nxURL := nxlSrv.server(t).URL
+	brURL := fakeBridge(t).URL
+
+	nxl := nexusledger.New(nexusledger.Config{BaseURL: nxURL, SiteID: "test", JWKSTTL: time.Second})
+	deps := handlers.Deps{
+		Bridge:  bridge.New(bridge.Config{BaseURL: brURL}),
+		Pricing: pricing.New(nxl),
+	}
+	gw := httptest.NewServer(New(nxl, deps))
+	t.Cleanup(gw.Close)
+
+	resp, out := post(t, gw.URL+"/api/mcp/catalog", "", map[string]any{
+		"action": "negotiate",
+		"items":  []map[string]any{{"product_id": 1, "qty": 12}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("negotiate: got %d, want 200", resp.StatusCode)
+	}
+	if out["quote_id"] != "qt_tier1" || out["negotiated"] != true {
+		t.Fatalf("negotiate: unexpected passthrough body %v", out)
+	}
+	items, _ := out["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("negotiate: want 1 line, got %v", items)
+	}
+	line, _ := items[0].(map[string]any)
+	if line["unit_price"] != 315.0 || line["price_source"] != "tier" {
+		t.Fatalf("negotiate: want tier detail, got %v", line)
+	}
+}
+
+// 2.2 — free plugin stores have no /catalog/negotiate: the bridge 404 must
+// surface as a gateway error the agent can recognize (fallback to fixed price).
+func TestCatalogNegotiateUnsupportedStore(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	nxlSrv := &fakeNXL{priv: priv, pub: pub, balance: 500}
+	nxURL := nxlSrv.server(t).URL
+
+	// Free-plugin bridge: no negotiate route registered → 404 from mux.
+	freeMux := http.NewServeMux()
+	freeMux.HandleFunc("GET /catalog/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"products": []any{}})
+	})
+	freeSrv := httptest.NewServer(freeMux)
+	t.Cleanup(freeSrv.Close)
+
+	nxl := nexusledger.New(nexusledger.Config{BaseURL: nxURL, SiteID: "test", JWKSTTL: time.Second})
+	deps := handlers.Deps{
+		Bridge:  bridge.New(bridge.Config{BaseURL: freeSrv.URL}),
+		Pricing: pricing.New(nxl),
+	}
+	gw := httptest.NewServer(New(nxl, deps))
+	t.Cleanup(gw.Close)
+
+	resp, out := post(t, gw.URL+"/api/mcp/catalog", "", map[string]any{
+		"action": "negotiate",
+		"items":  []map[string]any{{"product_id": 1, "qty": 12}},
+	})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("negotiate on free store: got %d, want 502", resp.StatusCode)
+	}
+	if _, ok := out["error"]; !ok {
+		t.Fatalf("negotiate on free store: want error field, got %v", out)
+	}
 }

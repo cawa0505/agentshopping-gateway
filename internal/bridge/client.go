@@ -121,6 +121,21 @@ type OrderItem struct {
 	Qty       int `json:"qty"`
 }
 
+// NegotiateTier returns the bridge's tier (negotiated) quote verbatim —
+// per-line unit_price/price_source detail included. The gateway passes the
+// response through unchanged; the bridge is the pricing authority.
+func (c *Client) NegotiateTier(ctx context.Context, items []OrderItem) (map[string]any, error) {
+	body := map[string]any{"items": items}
+	var out map[string]any
+	if err := c.postJSON(ctx, c.cfg.BaseURL+"/catalog/negotiate", body, &out); err != nil {
+		return nil, err
+	}
+	if msg, _ := out["error"].(string); msg != "" {
+		return nil, fmt.Errorf("bridge negotiate rejected: %s", msg)
+	}
+	return out, nil
+}
+
 // CreateOrder places a fully autonomous store order paid via the store-side
 // payment token referenced by paymentMethodRef. The bridge computes the
 // canonical total from live store prices.
