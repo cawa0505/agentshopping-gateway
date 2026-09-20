@@ -1,10 +1,12 @@
 // Package router wires the AgentShopping standard protocol modules onto a
-// stdlib http.ServeMux. Auth/ability middleware and platform bridges attach
-// to these routes in later tasks.
+// stdlib http.ServeMux, guarding module routes with NexusLedger auth.
 package router
 
 import (
 	"net/http"
+
+	"github.com/cawa0505/agentshopping-gateway/internal/auth"
+	"github.com/cawa0505/agentshopping-gateway/internal/nexusledger"
 )
 
 // Module names of the AgentShopping standard protocol.
@@ -15,11 +17,20 @@ const (
 	PostOrder = "post-order"
 )
 
-// New returns the gateway HTTP handler. Unregistered paths fall through to the
-// ServeMux default 404. Real module handlers are injected in later tasks; the
-// skeleton mounts a liveness probe plus placeholder module endpoints so routing
-// and 404 behavior are testable now.
-func New() *http.ServeMux {
+// moduleReq maps each standard module to its auth requirement. Catalog is
+// read-only (anonymous browsing allowed); cart/checkout/post-order require a
+// valid agent identity plus the matching ability.
+var moduleReq = map[string]auth.Requirement{
+	Catalog:   {ReadOnly: true},
+	Cart:      {Ability: "cart:write"},
+	Checkout:  {Ability: "checkout:pay"},
+	PostOrder: {Ability: "post-order:read"},
+}
+
+// New returns the gateway HTTP handler. Health and unknown paths bypass auth;
+// module routes are wrapped with NexusLedger identity/ability middleware.
+// Real bridge dispatch replaces the placeholder handlers in task 3.
+func New(nxl *nexusledger.Client) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -27,9 +38,9 @@ func New() *http.ServeMux {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// ponytail: placeholder module handlers — real bridge dispatch lands in task 3.
 	for _, m := range []string{Catalog, Cart, Checkout, PostOrder} {
-		mux.HandleFunc("POST /api/mcp/"+m, notImplemented)
+		// ponytail: placeholder module handler — real bridge dispatch lands in task 3.
+		mux.Handle("POST /api/mcp/"+m, auth.Middleware(nxl, moduleReq[m], http.HandlerFunc(notImplemented)))
 	}
 
 	return mux
