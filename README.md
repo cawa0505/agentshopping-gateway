@@ -14,8 +14,18 @@ go run ./cmd/gateway   # 預設 :8080，可用 GATEWAY_ADDR 覆寫
 
 `catalog` / `cart` / `checkout` / `post-order`，掛在 `/api/mcp/<module>`。
 
+## 採購授權模組（閉源）
+
+`purchasing` 掛在 `/api/mcp/purchasing`，ability `purchasing:pay`，三個 action：
+
+- `purchase` — quote-first：金額以店端 canonical 報價核對（Agent 報價不可信），原子 reserve → bridge 下單 → order-status capture。需 `binding_id` + `idempotency_key`（同 key 重放回原結果，不重複下單）。
+- `get_allowance` — 額度快照（granted − captured − active reservations，由 ledger 重建）。
+- `get_purchase` — 查詢採購狀態（僅限 binding 所屬 agent）。
+
+核心在 `internal/purchasing/`（領域模型 + policy evaluator）與 `internal/store/`（SQLite：原子 reservation、append-only ledger、冪等），閉源。EXECUTING 訂單由 `ReconcileExecuting` 掃描結案（paid → CAPTURED、failed → RELEASED）。
+
 ## 邊界
 
 - 開源：gateway 核心、能力驗證、標準協議路由。
-- 閉源（另置）：動態議價、GMV 分潤、企業管理。
-- auth/ledger 一律消費 NexusLedger，不自建。
+- 閉源：採購授權核心（`internal/purchasing/`、`internal/store/`）、動態議價、GMV 分潤、企業管理。
+- auth/ledger 一律消費 NexusLedger，不自建；DB 不存 raw payment credential（僅 opaque `payment_method_ref`）。
