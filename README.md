@@ -31,3 +31,7 @@ go run ./cmd/gateway   # 預設 :8080，可用 GATEWAY_ADDR 覆寫
 - 開源：gateway 核心、能力驗證、標準協議路由。
 - 閉源：採購授權核心（`internal/purchasing/`、`internal/store/`）、動態議價、GMV 分潤、企業管理。
 - auth/ledger 一律消費 NexusLedger，不自建；DB 不存 raw payment credential（僅 opaque `payment_method_ref`）。
+
+## License
+
+[MIT](LICENSE) — 僅涵蓋開源部分（見上「邊界」）；`internal/purchasing/` 與 `internal/store/` 為閉源，不在授權範圍。
